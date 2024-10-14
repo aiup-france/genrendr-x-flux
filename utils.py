@@ -1,4 +1,4 @@
-from comfy.ldm.flux.layers import DoubleStreamBlock as DSBold
+from core.Imagen.ldm.flux.layers import DoubleStreamBlock as DSBold
 import copy
 import torch
 from .xflux.src.flux.modules.layers import DoubleStreamBlock as DSBnew
@@ -7,7 +7,7 @@ from .layers import (DoubleStreamBlockLoraProcessor,
                      DoubleStreamBlockLorasMixerProcessor,
                      DoubleStreamMixerProcessor)
 
-from comfy.utils import get_attr, set_attr
+from core.Imagen.utils import get_attr, set_attr
 
 import numpy as np
 
@@ -37,14 +37,15 @@ def CopyDSB(oldDSB):
     return oldDSB
 
 def copy_model(orig, new):
-    new = copy.copy(new)
-    new.model = copy.copy(orig.model)
-    new.model.diffusion_model = copy.copy(orig.model.diffusion_model)
-    new.model.diffusion_model.double_blocks = copy.deepcopy(orig.model.diffusion_model.double_blocks)
-    count = len(new.model.diffusion_model.double_blocks)
-    for i in range(count):
-        new.model.diffusion_model.double_blocks[i] = copy.copy(orig.model.diffusion_model.double_blocks[i])
-        new.model.diffusion_model.double_blocks[i].load_state_dict(orig.model.diffusion_model.double_blocks[0].state_dict())
+    with torch.no_grad():
+        new = copy.copy(new)
+        new.model = copy.copy(orig.model)
+        new.model.diffusion_model = copy.copy(orig.model.diffusion_model)
+        new.model.diffusion_model.double_blocks = copy.deepcopy(orig.model.diffusion_model.double_blocks)
+        count = len(new.model.diffusion_model.double_blocks)
+        for i in range(count):
+            new.model.diffusion_model.double_blocks[i] = copy.copy(orig.model.diffusion_model.double_blocks[i])
+            new.model.diffusion_model.double_blocks[i].load_state_dict(orig.model.diffusion_model.double_blocks[0].state_dict())
 """
 class PbarWrapper:
     def __init__(self):
@@ -189,7 +190,7 @@ def set_attn_processor(model_flux, processor):
     for name, module in model_flux.named_children():
         fn_recursive_attn_processor(name, module, processor)
 
-class LATENT_PROCESSOR_COMFY:
+class LATENT_PROCESSOR_Imagen:
     def __init__(self):
         self.scale_factor = 0.3611
         self.shift_factor = 0.1159
@@ -218,13 +219,13 @@ class LATENT_PROCESSOR_COMFY:
 
 
 
-def check_is_comfy_lora(sd):
+def check_is_Imagen_lora(sd):
     for k in sd:
         if "lora_down" in k or "lora_up" in k:
             return True
     return False
 
-def comfy_to_xlabs_lora(sd):
+def Imagen_to_xlabs_lora(sd):
     sd_out = {}
     for k in sd:
         if "diffusion_model" in k:

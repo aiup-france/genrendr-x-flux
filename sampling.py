@@ -31,8 +31,9 @@ def model_forward(
         if guidance is None:
             raise ValueError("Didn't get guidance strength for guidance distilled model.")
         vec = vec + model.guidance_in(timestep_embedding(guidance, 256))
-    vec = vec + model.vector_in(y)
-    txt = model.txt_in(txt)
+    with torch.no_grad():
+        vec = vec + model.vector_in(y)
+        txt = model.txt_in(txt)
 
     ids = torch.cat((txt_ids, img_ids), dim=1)
     pe = model.pe_embedder(ids)
@@ -190,30 +191,32 @@ def denoise(
         guidance_vec = None
     for t_curr, t_prev in tqdm(zip(timesteps[:-1], timesteps[1:]), desc="Sampling", total = len(timesteps)-1):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
-        pred = model_forward(
-            model,
-            img=img,
-            img_ids=img_ids,
-            txt=txt,
-            txt_ids=txt_ids,
-            y=vec,
-            timesteps=t_vec,
-            guidance=guidance_vec,
-        )
-        if i >= timestep_to_start_cfg:
-            neg_pred = model_forward(
+        with torch.no_grad():
+            
+            pred = model_forward(
                 model,
                 img=img,
                 img_ids=img_ids,
-                txt=neg_txt,
-                txt_ids=neg_txt_ids,
-                y=neg_vec,
+                txt=txt,
+                txt_ids=txt_ids,
+                y=vec,
                 timesteps=t_vec,
                 guidance=guidance_vec,
-                neg_mode = True,
             )
-            pred = neg_pred + true_gs * (pred - neg_pred)
-        img = img + (t_prev - t_curr) * pred
+            if i >= timestep_to_start_cfg:
+                neg_pred = model_forward(
+                    model,
+                    img=img,
+                    img_ids=img_ids,
+                    txt=neg_txt,
+                    txt_ids=neg_txt_ids,
+                    y=neg_vec,
+                    timesteps=t_vec,
+                    guidance=guidance_vec,
+                    neg_mode = True,
+                )
+                pred = neg_pred + true_gs * (pred - neg_pred)
+            img = img + (t_prev - t_curr) * pred
 
         if callback is not None:
             unpacked = unpack(img.float(), height, width)
@@ -277,37 +280,38 @@ def denoise_controlnet(
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         guidance_vec = guidance_vec.to(img.device, dtype=img.dtype)
         controlnet_hidden_states = None
-        for container in controlnets_container:
-            if container.controlnet_start_step <= i <= container.controlnet_end_step:
-                block_res_samples = container.controlnet(
-                    img=img,
-                    img_ids=img_ids,
-                    controlnet_cond=container.controlnet_cond,
-                    txt=txt,
-                    txt_ids=txt_ids,
-                    y=vec,
-                    timesteps=t_vec,
-                    guidance=guidance_vec,
-                )
-            if controlnet_hidden_states is None:                
-                controlnet_hidden_states = [sample * container.controlnet_gs for sample in block_res_samples]
-            else:
-                if len(controlnet_hidden_states) == len(block_res_samples):
-                    for j in range(len(controlnet_hidden_states)):
-                        controlnet_hidden_states[j] += block_res_samples[j] * container.controlnet_gs
-            
+        with torch.no_grad():
+            for container in controlnets_container:
+                if container.controlnet_start_step <= i <= container.controlnet_end_step:
+                    block_res_samples = container.controlnet(
+                        img=img,
+                        img_ids=img_ids,
+                        controlnet_cond=container.controlnet_cond,
+                        txt=txt,
+                        txt_ids=txt_ids,
+                        y=vec,
+                        timesteps=t_vec,
+                        guidance=guidance_vec,
+                    )
+                if controlnet_hidden_states is None:                
+                    controlnet_hidden_states = [sample * container.controlnet_gs for sample in block_res_samples]
+                else:
+                    if len(controlnet_hidden_states) == len(block_res_samples):
+                        for j in range(len(controlnet_hidden_states)):
+                            controlnet_hidden_states[j] += block_res_samples[j] * container.controlnet_gs
 
-        pred = model_forward(
-            model,
-            img=img,
-            img_ids=img_ids,
-            txt=txt,
-            txt_ids=txt_ids,
-            y=vec,
-            timesteps=t_vec,
-            guidance=guidance_vec,
-            block_controlnet_hidden_states=controlnet_hidden_states
-        )
+        with torch.no_grad():
+            pred = model_forward(
+                model,
+                img=img,
+                img_ids=img_ids,
+                txt=txt,
+                txt_ids=txt_ids,
+                y=vec,
+                timesteps=t_vec,
+                guidance=guidance_vec,
+                block_controlnet_hidden_states=controlnet_hidden_states
+            )
         neg_controlnet_hidden_states = None
         if i >= timestep_to_start_cfg:
             for container in controlnets_container:
@@ -329,20 +333,20 @@ def denoise_controlnet(
                             for j in range(len(neg_controlnet_hidden_states)):
                                 neg_controlnet_hidden_states[j] += neg_block_res_samples[j] * container.controlnet_gs
                 
-
-            neg_pred = model_forward(
-                model,
-                img=img,
-                img_ids=img_ids,
-                txt=neg_txt,
-                txt_ids=neg_txt_ids,
-                y=neg_vec,
-                timesteps=t_vec,
-                guidance=guidance_vec,
-                block_controlnet_hidden_states=neg_controlnet_hidden_states,
-                neg_mode=True,
-            )
-            pred = neg_pred + true_gs * (pred - neg_pred)
+            with torch.no_grad():
+                neg_pred = model_forward(
+                    model,
+                    img=img,
+                    img_ids=img_ids,
+                    txt=neg_txt,
+                    txt_ids=neg_txt_ids,
+                    y=neg_vec,
+                    timesteps=t_vec,
+                    guidance=guidance_vec,
+                    block_controlnet_hidden_states=neg_controlnet_hidden_states,
+                    neg_mode=True,
+                )
+                pred = neg_pred + true_gs * (pred - neg_pred)
         img = img + (t_prev - t_curr) * pred
 
         if callback is not None:
