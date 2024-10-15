@@ -1,5 +1,5 @@
 from .nodes import ApplyFluxControlNet, XlabsSampler,LoadFluxControlNet
-from config import parse_config 
+from core.config import parse_config 
 
 
 def controlnetFlux(image, model, pos_conditioning, neg_conditioning,seed,latent_image,steps ):

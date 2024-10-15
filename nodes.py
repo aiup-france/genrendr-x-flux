@@ -6,6 +6,8 @@ from core.Imagen.clip_vision import load as load_clip_vision
 from core.Imagen.clip_vision import clip_preprocess, Output
 import core.latent_preview
 import copy
+import gc
+gc.collect()
 
 import core.folder_paths
 
@@ -34,11 +36,12 @@ from .xflux.src.flux.model import Flux as ModFlux
 #from .model_init import double_blocks_init, single_blocks_init
 
 
-from Imagen.utils import get_attr, set_attr
+from core.Imagen.utils import get_attr, set_attr
 from .clip import FluxClipViT
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
-dir_xlabs = os.path.join(folder_paths.models_dir, "xlabs")
+dir_xlabs = os.path.join(core.folder_paths.models_dir, "xlabs")
 os.makedirs(dir_xlabs, exist_ok=True)
 dir_xlabs_loras = os.path.join(dir_xlabs, "loras")
 os.makedirs(dir_xlabs_loras, exist_ok=True)
@@ -50,12 +53,12 @@ dir_xlabs_ipadapters = os.path.join(dir_xlabs, "ipadapters")
 os.makedirs(dir_xlabs_ipadapters, exist_ok=True)
 
 
-folder_paths.folder_names_and_paths["xlabs"] = ([dir_xlabs], folder_paths.supported_pt_extensions)
-folder_paths.folder_names_and_paths["xlabs_loras"] = ([dir_xlabs_loras], folder_paths.supported_pt_extensions)
-folder_paths.folder_names_and_paths["xlabs_controlnets"] = ([dir_xlabs_controlnets], folder_paths.supported_pt_extensions)
-folder_paths.folder_names_and_paths["xlabs_ipadapters"] = ([dir_xlabs_ipadapters], folder_paths.supported_pt_extensions)
-folder_paths.folder_names_and_paths["xlabs_flux"] = ([dir_xlabs_flux], folder_paths.supported_pt_extensions)
-folder_paths.folder_names_and_paths["xlabs_flux_json"] = ([dir_xlabs_flux], set({'.json',}))
+core.folder_paths.folder_names_and_paths["xlabs"] = ([dir_xlabs], core.folder_paths.supported_pt_extensions)
+core.folder_paths.folder_names_and_paths["xlabs_loras"] = ([dir_xlabs_loras], core.folder_paths.supported_pt_extensions)
+core.folder_paths.folder_names_and_paths["xlabs_controlnets"] = ([dir_xlabs_controlnets], core.folder_paths.supported_pt_extensions)
+core.folder_paths.folder_names_and_paths["xlabs_ipadapters"] = ([dir_xlabs_ipadapters], core.folder_paths.supported_pt_extensions)
+core.folder_paths.folder_names_and_paths["xlabs_flux"] = ([dir_xlabs_flux], core.folder_paths.supported_pt_extensions)
+core.folder_paths.folder_names_and_paths["xlabs_flux_json"] = ([dir_xlabs_flux], set({'.json',}))
 
 
 
@@ -90,7 +93,7 @@ class LoadFluxLora:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "lora_name": (cleanprint(folder_paths.get_filename_list("xlabs_loras")), ),
+                              "lora_name": (cleanprint(core.folder_paths.get_filename_list("xlabs_loras")), ),
                               "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                               }}
 
@@ -210,7 +213,7 @@ class LoadFluxControlNet:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"model_name": (["flux-dev", "flux-dev-fp8", "flux-schnell"],),
-                              "controlnet_path": (folder_paths.get_filename_list("xlabs_controlnets"), ),
+                              "controlnet_path": (core.folder_paths.get_filename_list("xlabs_controlnets"), ),
                               }}
 
     RETURN_TYPES = ("FluxControlNet",)
@@ -337,7 +340,169 @@ class XlabsSampler:
     RETURN_NAMES = ("latent",)
     FUNCTION = "sampling"
     CATEGORY = "XLabsNodes"
+    def sampling(self, model, conditioning, neg_conditioning,
+             noise_seed, steps, timestep_to_start_cfg, true_gs,
+             image_to_image_strength, denoise_strength,
+             latent_image=None, controlnet_condition=None):
     
+        additional_steps = 11 if controlnet_condition is None else 12
+        from torch.cuda.amp import autocast
+ 
+        torch.cuda.empty_cache()
+        # Assurez-vous que le modèle est chargé sans gradients
+        print("****** load model ____________", model)
+        with torch.no_grad():
+            ##mm.load_model_gpu(model)
+            inmodel = model.model.to(torch.bfloat16)
+            print("Chargement du modèle", inmodel)
+       
+
+        torch.cuda.empty_cache()  # Nettoyage de la mémoire GPU
+       
+
+        torch.cuda.empty_cache()
+
+        # Charger certaines parties du modèle sur le GPU
+  
+        inmodel.diffusion_model.double_blocks.to('cpu')  # Charger les blocs double sur le GPU
+        inmodel.diffusion_model.single_blocks.to('cuda:0')   # Charger les blocs simples sur le CPU
+        inmodel.diffusion_model.final_layer.to('cuda:0')     # Charger la couche finale sur le CPU
+
+        print("Chargement du modèle", inmodel)
+
+        torch.cuda.empty_cache()  # Nettoyage de la mémoire GPU
+
+        # Définir le device et d'autres paramètres
+        device = mm.get_torch_device()
+        print("Device", device)
+        device='cuda:1'
+        # Configuration des types de données
+        dtype_model = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+        torch.manual_seed(noise_seed)
+
+        # Latente
+        bc, c, h, w = latent_image['samples'].shape
+        height, width = (h // 2) * 16, (w // 2) * 16
+        device = 'cuda:0'
+      
+        with torch.no_grad():
+            x = get_noise(bc, height, width, device=device, dtype=dtype_model, seed=noise_seed)
+
+        orig_x = None
+        if c == 16:
+            orig_x = LATENT_PROCESSOR_Imagen().go_back(latent_image['samples']).to(device, dtype=dtype_model)
+
+        timesteps = get_schedule(steps, (width // 8) * (height // 8) // 4, shift=True)
+
+        # Nettoyage de la mémoire GPU après la préparation
+        torch.cuda.empty_cache()
+        
+        #try:
+         #   inmodel.to(device)
+        #except:
+          #  pass
+        try:
+            guidance = conditioning[0][1]['guidance']
+        except:
+            guidance = 1.0
+
+        # Préparer les conditions
+        with torch.no_grad():
+            inp_cond = prepare(conditioning[0][0], conditioning[0][1]['pooled_output'], img=x)
+            neg_inp_cond = prepare(neg_conditioning[0][0], neg_conditioning[0][1]['pooled_output'], img=x)
+
+        if denoise_strength <= 0.99:
+            timesteps = timesteps[:int(len(timesteps) * denoise_strength)]
+
+        # Préparation du callback pour un aperçu en temps réel
+        x0_output = {}
+        callback = core.latent_preview.prepare_callback(model, len(timesteps) - 1, x0_output)
+        
+        if controlnet_condition is None:
+            print("NO conditioning ************$")
+            with torch.no_grad():
+                x = denoise(
+                    inmodel.diffusion_model, **inp_cond, timesteps=timesteps, guidance=guidance,
+                    timestep_to_start_cfg=timestep_to_start_cfg,
+                    neg_txt=neg_inp_cond['txt'], neg_txt_ids=neg_inp_cond['txt_ids'],
+                    neg_vec=neg_inp_cond['vec'], true_gs=true_gs,
+                    image2image_strength=image_to_image_strength, orig_image=orig_x,
+                    callback=callback, width=width, height=height,
+                )
+            # Nettoyage de la mémoire GPU
+            del inp_cond, neg_inp_cond, orig_x
+            torch.cuda.empty_cache()
+
+     
+        else:
+            def prepare_controlnet_condition(controlnet_condition):
+                print("confitioning ************$")
+                with torch.no_grad():
+                    controlnet = controlnet_condition['model']
+                 
+
+                    # Charger d'autres parties sur le CPU ou GPU selon vos besoins
+                    controlnet.pe_embedder.to('cuda:1')          # Charger l'embedder sur le CPU
+                    controlnet.img_in.to('cuda:1')            # Charger l'entrée image sur le GPU
+                    controlnet.pos_embed_input.to('cuda:1')   # Charger l'embedder de position sur le GPU
+                    controlnet.time_in.to('cuda:1')           # Charger time_in sur le GPU
+                    controlnet.vector_in.to('cuda:1')         # Charger vector_in sur le GPU
+                    controlnet.guidance_in.to('cuda:1')       # Charger guidance_in sur le GPU
+                    controlnet.txt_in.to('cuda:1')            # Charger txt_in sur le GPU
+                    controlnet.input_hint_block.to('cuda:1') 
+                    print("___________controlnet_______**************", controlnet)
+                    controlnet_image = torch.nn.functional.interpolate(
+                        controlnet_condition['img'], size=(height, width), mode='bicubic')
+                    controlnet_strength = controlnet_condition['controlnet_strength']
+                    controlnet_start = controlnet_condition['start']
+                    controlnet_end = controlnet_condition['end']
+                    controlnet.to(device, dtype=dtype_model)
+                    controlnet_image = controlnet_image.to(device, dtype=dtype_model)
+                    return {
+                        "img": controlnet_image, "controlnet_strength": controlnet_strength,
+                        "model": controlnet, "start": controlnet_start, "end": controlnet_end,
+                    }
+            # Gestion des conditions ControlNet
+            cnet_conditions = [prepare_controlnet_condition(el) for el in controlnet_condition]
+            containers = []
+            for el in cnet_conditions:
+                start_step = int(el['start'] * len(timesteps))
+                end_step = int(el['end'] * len(timesteps))
+                container = ControlNetContainer(el['model'], el['img'], el['controlnet_strength'], start_step, end_step)
+                containers.append(container)
+
+            # Denoising avec ControlNet
+            with torch.no_grad():
+                x = denoise_controlnet(
+                    inmodel.diffusion_model, **inp_cond, controlnets_container=containers,
+                    timesteps=timesteps, guidance=guidance,
+                    timestep_to_start_cfg=timestep_to_start_cfg,
+                    neg_txt=neg_inp_cond['txt'], neg_txt_ids=neg_inp_cond['txt_ids'],
+                    neg_vec=neg_inp_cond['vec'], true_gs=true_gs,
+                    image2image_strength=image_to_image_strength, orig_image=orig_x,
+                    callback=callback, width=width, height=height,
+                )
+
+            # Nettoyage et libération de la mémoire
+            del inp_cond, neg_inp_cond, orig_x
+            del containers
+            torch.cuda.empty_cache()
+            
+        # Traitement final de l'image latente
+        x = unpack(x, height, width)
+        x = LATENT_PROCESSOR_Imagen()(x)
+
+        lat_ret = {"samples": x}
+
+        # Libération finale de la mémoire
+        del x, latent_image, inmodel, model
+        torch.cuda.empty_cache()
+
+        return lat_ret
+       
+
+    '''
     def sampling(self, model, conditioning, neg_conditioning,
              noise_seed, steps, timestep_to_start_cfg, true_gs,
              image_to_image_strength, denoise_strength,
@@ -365,13 +530,16 @@ class XlabsSampler:
 
         device = mm.get_torch_device()
         print("device", device)
-      
+        torch.cuda.empty_cache()
+
         if torch.backends.mps.is_available():
             device = torch.device("mps")
         dtype_model = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         offload_device = mm.unet_offload_device()
-      
+        torch.cuda.empty_cache()
+
         torch.manual_seed(noise_seed)
+        torch.cuda.empty_cache()
 
         # latente
         bc, c, h, w = latent_image['samples'].shape
@@ -410,7 +578,7 @@ class XlabsSampler:
 
         # Préparation du callback pour un aperçu en temps réel
         x0_output = {}
-        callback = latent_preview.prepare_callback(model, len(timesteps) - 1, x0_output)
+        callback = core.latent_preview.prepare_callback(model, len(timesteps) - 1, x0_output)
 
         # Si ControlNet n'est pas utilisé
         if controlnet_condition is None:
@@ -458,6 +626,10 @@ class XlabsSampler:
             #    mm.load_models_gpu([model])
 
             total_steps = len(timesteps)
+            print("container", container)
+            del container
+            torch.cuda.empty_cache()
+            
 
             with torch.no_grad():
                 x = denoise_controlnet(
@@ -485,7 +657,7 @@ class XlabsSampler:
         torch.cuda.empty_cache()
 
         return lat_ret
-   
+    '''
     '''
     def sampling(self, model, conditioning, neg_conditioning,
                  noise_seed, steps, timestep_to_start_cfg, true_gs,
@@ -675,8 +847,8 @@ class LoadFluxIPAdapter:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-                "ipadatper": (folder_paths.get_filename_list("xlabs_ipadapters"),),
-                "clip_vision": (folder_paths.get_filename_list("clip_vision"),),
+                "ipadatper": (core.folder_paths.get_filename_list("xlabs_ipadapters"),),
+                "clip_vision": (core.folder_paths.get_filename_list("clip_vision"),),
                 "provider": (["CPU", "GPU",],),
             }
         }
@@ -694,7 +866,7 @@ class LoadFluxIPAdapter:
         path = os.path.join(dir_xlabs_ipadapters, ipadatper)
         ckpt = load_safetensors(path)
         pbar.update(1)
-        path_clip = folder_paths.get_full_path("clip_vision", clip_vision)
+        path_clip = core.folder_paths.get_full_path("clip_vision", clip_vision)
         
         try: 
             clip = FluxClipViT(path_clip)

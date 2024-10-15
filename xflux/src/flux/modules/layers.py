@@ -6,6 +6,8 @@ from einops import rearrange
 from torch import Tensor, nn
 
 from ..math import attention, rope
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 
 class EmbedND(nn.Module):
@@ -16,11 +18,12 @@ class EmbedND(nn.Module):
         self.axes_dim = axes_dim
 
     def forward(self, ids: Tensor) -> Tensor:
-        n_axes = ids.shape[-1]
-        emb = torch.cat(
-            [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
-            dim=-3,
-        )
+        with torch.no_grad():
+            n_axes = ids.shape[-1]
+            emb = torch.cat(
+                [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
+                dim=-3,
+            )
 
         return emb.unsqueeze(1)
 
@@ -34,18 +37,19 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
     :param max_period: controls the minimum frequency of the embeddings.
     :return: an (N, D) Tensor of positional embeddings.
     """
-    t = time_factor * t
-    half = dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
-        t.device
-    )
+    with torch.no_grad():
+        t = time_factor * t
+        half = dim // 2
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            t.device
+        )
 
-    args = t[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    if torch.is_floating_point(t):
-        embedding = embedding.to(t)
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        if torch.is_floating_point(t):
+            embedding = embedding.to(t)
     return embedding
 
 
@@ -57,7 +61,8 @@ class MLPEmbedder(nn.Module):
         self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=True)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.out_layer(self.silu(self.in_layer(x)))
+        with torch.no_grad():
+             return self.out_layer(self.silu(self.in_layer(x)))
 
 
 class RMSNorm(torch.nn.Module):
@@ -66,9 +71,10 @@ class RMSNorm(torch.nn.Module):
         self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: Tensor):
-        x_dtype = x.dtype
-        x = x.float()
-        rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
+        with torch.no_grad():
+            x_dtype = x.dtype
+            x = x.float()
+            rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
         return (x * rrms).to(dtype=x_dtype) * self.scale
 
 
@@ -79,8 +85,9 @@ class QKNorm(torch.nn.Module):
         self.key_norm = RMSNorm(dim)
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
-        q = self.query_norm(q)
-        k = self.key_norm(k)
+        with torch.no_grad():
+            q = self.query_norm(q)
+            k = self.key_norm(k)
         return q.to(v), k.to(v)
 
 class LoRALinearLayer(nn.Module):
@@ -112,12 +119,12 @@ class LoRALinearLayer(nn.Module):
 class FLuxSelfAttnProcessor:
     def __call__(self, attn, x, pe, **attention_kwargs):
         print('2' * 30)
-
-        qkv = attn.qkv(x)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        q, k = attn.norm(q, k, v)
-        x = attention(q, k, v, pe=pe)
-        x = attn.proj(x)
+        with torch.no_grad():
+            qkv = attn.qkv(x)
+            q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            q, k = attn.norm(q, k, v)
+            x = attention(q, k, v, pe=pe)
+            x = attn.proj(x)
         return x
 
 class LoraFluxAttnProcessor(nn.Module):
@@ -167,7 +174,8 @@ class Modulation(nn.Module):
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
+        with torch.no_grad():
+             out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
 
         return (
             ModulationOut(*out[:3]),
@@ -184,77 +192,81 @@ class DoubleStreamBlockLoraProcessor(nn.Module):
         self.lora_weight = lora_weight
 
     def forward(self, attn, img, txt, vec, pe, **attention_kwargs):
-        img_mod1, img_mod2 = attn.img_mod(vec)
-        txt_mod1, txt_mod2 = attn.txt_mod(vec)
+        with torch.no_grad():
+            img_mod1, img_mod2 = attn.img_mod(vec)
+            txt_mod1, txt_mod2 = attn.txt_mod(vec)
 
-        # prepare image for attention
-        img_modulated = attn.img_norm1(img)
-        img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
-        img_qkv = attn.img_attn.qkv(img_modulated) + self.qkv_lora1(img_modulated) * self.lora_weight
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
-        img_q, img_k = attn.img_attn.norm(img_q, img_k, img_v)
+            # prepare image for attention
+            img_modulated = attn.img_norm1(img)
+            img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
+            img_qkv = attn.img_attn.qkv(img_modulated) + self.qkv_lora1(img_modulated) * self.lora_weight
+            img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
+            img_q, img_k = attn.img_attn.norm(img_q, img_k, img_v)
 
-        # prepare txt for attention
-        txt_modulated = attn.txt_norm1(txt)
-        txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
-        txt_qkv = attn.txt_attn.qkv(txt_modulated) + self.qkv_lora2(txt_modulated) * self.lora_weight
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
-        txt_q, txt_k = attn.txt_attn.norm(txt_q, txt_k, txt_v)
+            # prepare txt for attention
+            txt_modulated = attn.txt_norm1(txt)
+            txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+            txt_qkv = attn.txt_attn.qkv(txt_modulated) + self.qkv_lora2(txt_modulated) * self.lora_weight
+            txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
+            txt_q, txt_k = attn.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        # run actual attention
-        q = torch.cat((txt_q, img_q), dim=2)
-        k = torch.cat((txt_k, img_k), dim=2)
-        v = torch.cat((txt_v, img_v), dim=2)
+            # run actual attention
+            q = torch.cat((txt_q, img_q), dim=2)
+            k = torch.cat((txt_k, img_k), dim=2)
+            v = torch.cat((txt_v, img_v), dim=2)
 
-        attn1 = attention(q, k, v, pe=pe)
-        txt_attn, img_attn = attn1[:, : txt.shape[1]], attn1[:, txt.shape[1] :]
+            attn1 = attention(q, k, v, pe=pe)
+            txt_attn, img_attn = attn1[:, : txt.shape[1]], attn1[:, txt.shape[1] :]
 
-        # calculate the img bloks
-        img = img + img_mod1.gate * attn.img_attn.proj(img_attn) + img_mod1.gate * self.proj_lora1(img_attn) * self.lora_weight
-        img = img + img_mod2.gate * attn.img_mlp((1 + img_mod2.scale) * attn.img_norm2(img) + img_mod2.shift)
+            # calculate the img bloks
+            img = img + img_mod1.gate * attn.img_attn.proj(img_attn) + img_mod1.gate * self.proj_lora1(img_attn) * self.lora_weight
+            img = img + img_mod2.gate * attn.img_mlp((1 + img_mod2.scale) * attn.img_norm2(img) + img_mod2.shift)
 
-        # calculate the txt bloks
-        txt = txt + txt_mod1.gate * attn.txt_attn.proj(txt_attn) + txt_mod1.gate * self.proj_lora2(txt_attn) * self.lora_weight
-        txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
+            # calculate the txt bloks
+            txt = txt + txt_mod1.gate * attn.txt_attn.proj(txt_attn) + txt_mod1.gate * self.proj_lora2(txt_attn) * self.lora_weight
+            txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
+            # Libérer la mémoire des tenseurs intermédiaires si nécessaire
+        del img_modulated, txt_modulated
+        torch.cuda.empty_cache()  # Libérer la mémoire GPU si nécessaire
         return img, txt
 
 class DoubleStreamBlockProcessor(nn.Module):
     def __init__(self):
         super().__init__()
     def __call__(self, attn, img, txt, vec, pe, **attention_kwargs):
-        
-        img_mod1, img_mod2 = attn.img_mod(vec)
-        txt_mod1, txt_mod2 = attn.txt_mod(vec)
+        with torch.no_grad():
+            img_mod1, img_mod2 = attn.img_mod(vec)
+            txt_mod1, txt_mod2 = attn.txt_mod(vec)
 
-        # prepare image for attention
-        img_modulated = attn.img_norm1(img)
-        img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
-        img_qkv = attn.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
-        img_q, img_k = attn.img_attn.norm(img_q, img_k, img_v)
+            # prepare image for attention
+            img_modulated = attn.img_norm1(img)
+            img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
+            img_qkv = attn.img_attn.qkv(img_modulated)
+            img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
+            img_q, img_k = attn.img_attn.norm(img_q, img_k, img_v)
 
-        # prepare txt for attention
-        txt_modulated = attn.txt_norm1(txt)
-        txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
-        txt_qkv = attn.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
-        txt_q, txt_k = attn.txt_attn.norm(txt_q, txt_k, txt_v)
+            # prepare txt for attention
+            txt_modulated = attn.txt_norm1(txt)
+            txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+            txt_qkv = attn.txt_attn.qkv(txt_modulated)
+            txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads)
+            txt_q, txt_k = attn.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        # run actual attention
-        q = torch.cat((txt_q, img_q), dim=2)
-        k = torch.cat((txt_k, img_k), dim=2)
-        v = torch.cat((txt_v, img_v), dim=2)
+            # run actual attention
+            q = torch.cat((txt_q, img_q), dim=2)
+            k = torch.cat((txt_k, img_k), dim=2)
+            v = torch.cat((txt_v, img_v), dim=2)
+            with torch.no_grad():
+                attn1 = attention(q, k, v, pe=pe)
+                txt_attn, img_attn = attn1[:, : txt.shape[1]], attn1[:, txt.shape[1] :]
 
-        attn1 = attention(q, k, v, pe=pe)
-        txt_attn, img_attn = attn1[:, : txt.shape[1]], attn1[:, txt.shape[1] :]
+            # calculate the img bloks
+            img = img + img_mod1.gate * attn.img_attn.proj(img_attn)
+            img = img + img_mod2.gate * attn.img_mlp((1 + img_mod2.scale) * attn.img_norm2(img) + img_mod2.shift)
 
-        # calculate the img bloks
-        img = img + img_mod1.gate * attn.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * attn.img_mlp((1 + img_mod2.scale) * attn.img_norm2(img) + img_mod2.shift)
-
-        # calculate the txt bloks
-        txt = txt + txt_mod1.gate * attn.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
+            # calculate the txt bloks
+            txt = txt + txt_mod1.gate * attn.txt_attn.proj(txt_attn)
+            txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
         return img, txt
 
 class DoubleStreamBlock(nn.Module):
@@ -293,8 +305,19 @@ class DoubleStreamBlock(nn.Module):
     def get_processor(self):
         return self.processor
 
+    #def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
+    #return self.processor(self, img, txt, vec, pe)
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
-      return self.processor(self, img, txt, vec, pe)
+        with torch.no_grad():  # Optionnel, si vous ne souhaitez pas suivre les gradients ici
+
+            output_img, output_txt = self.processor(self, img, txt, vec, pe)
+
+            # Libération de la mémoire (si des tensors intermédiaires étaient créés)
+            # Supprimez ici les objets non nécessaires
+            del img, txt, vec, pe
+            torch.cuda.empty_cache()  # Optionnel, si vous souhaitez réduire la fragmentation
+
+        return output_img, output_txt
 
 class SingleStreamBlock(nn.Module):
     """

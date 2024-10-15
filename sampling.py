@@ -10,6 +10,8 @@ import numpy as np
 from .layers import DoubleStreamMixerProcessor, timestep_embedding
 from tqdm.auto import tqdm
 from .utils import ControlNetContainer
+
+
 def model_forward(
     model,
     img: Tensor,
@@ -39,7 +41,9 @@ def model_forward(
     pe = model.pe_embedder(ids)
     if block_controlnet_hidden_states is not None:
         controlnet_depth = len(block_controlnet_hidden_states)
+  
     for index_block, block in enumerate(model.double_blocks):
+ 
         if hasattr(block, "processor"):
             if isinstance(block.processor, DoubleStreamMixerProcessor):
                 if neg_mode:
@@ -48,20 +52,22 @@ def model_forward(
                 else:
                     for ip in block.processor.ip_adapters:
                         ip.ip_hidden_states = ip.in_hidden_states_pos
-
+        
         img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+       
         # controlnet residual
-
+        
         if block_controlnet_hidden_states is not None:
             img = img + block_controlnet_hidden_states[index_block % 2]
 
-
     img = torch.cat((txt, img), 1)
-    for block in model.single_blocks:
+    for block in model.single_blocks:   
         img = block(img, vec=vec, pe=pe)
+    
     img = img[:, txt.shape[1] :, ...]
-
+    
     img = model.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+  
     return img
 
 def get_noise(
