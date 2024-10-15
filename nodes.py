@@ -362,11 +362,11 @@ class XlabsSampler:
 
         torch.cuda.empty_cache()
 
-        # Charger certaines parties du modèle sur le GPU
+        
   
-        inmodel.diffusion_model.double_blocks.to('cpu')  # Charger les blocs double sur le GPU
-        inmodel.diffusion_model.single_blocks.to('cuda:0')   # Charger les blocs simples sur le CPU
-        inmodel.diffusion_model.final_layer.to('cuda:0')     # Charger la couche finale sur le CPU
+        inmodel.diffusion_model.double_blocks.to('cpu')  
+        inmodel.diffusion_model.single_blocks.to('cuda:0') 
+        inmodel.diffusion_model.final_layer.to('cuda:0')  
 
         print("Chargement du modèle", inmodel)
 
@@ -442,14 +442,14 @@ class XlabsSampler:
                     controlnet = controlnet_condition['model']
                  
 
-                    # Charger d'autres parties sur le CPU ou GPU selon vos besoins
-                    controlnet.pe_embedder.to('cuda:1')          # Charger l'embedder sur le CPU
-                    controlnet.img_in.to('cuda:1')            # Charger l'entrée image sur le GPU
-                    controlnet.pos_embed_input.to('cuda:1')   # Charger l'embedder de position sur le GPU
-                    controlnet.time_in.to('cuda:1')           # Charger time_in sur le GPU
-                    controlnet.vector_in.to('cuda:1')         # Charger vector_in sur le GPU
-                    controlnet.guidance_in.to('cuda:1')       # Charger guidance_in sur le GPU
-                    controlnet.txt_in.to('cuda:1')            # Charger txt_in sur le GPU
+                   
+                    controlnet.pe_embedder.to('cuda:1')         
+                    controlnet.img_in.to('cuda:1')           
+                    controlnet.pos_embed_input.to('cuda:1')  
+                    controlnet.time_in.to('cuda:1')           
+                    controlnet.vector_in.to('cuda:1')      
+                    controlnet.guidance_in.to('cuda:1')      
+                    controlnet.txt_in.to('cuda:1')           
                     controlnet.input_hint_block.to('cuda:1') 
                     print("___________controlnet_______**************", controlnet)
                     controlnet_image = torch.nn.functional.interpolate(
