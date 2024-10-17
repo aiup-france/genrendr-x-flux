@@ -41,9 +41,9 @@ def model_forward(
     pe = model.pe_embedder(ids)
     if block_controlnet_hidden_states is not None:
         controlnet_depth = len(block_controlnet_hidden_states)
-  
+
     for index_block, block in enumerate(model.double_blocks):
- 
+        '''
         if hasattr(block, "processor"):
             if isinstance(block.processor, DoubleStreamMixerProcessor):
                 if neg_mode:
@@ -52,13 +52,15 @@ def model_forward(
                 else:
                     for ip in block.processor.ip_adapters:
                         ip.ip_hidden_states = ip.in_hidden_states_pos
-        
-        img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+        '''
        
-        # controlnet residual
-        
+
+        img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+
+            # controlnet residual
+
         if block_controlnet_hidden_states is not None:
-            img = img + block_controlnet_hidden_states[index_block % 2]
+                img = img + block_controlnet_hidden_states[index_block % 2]
 
     img = torch.cat((txt, img), 1)
     for block in model.single_blocks:   
@@ -281,7 +283,7 @@ def denoise_controlnet(
         guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
     else:
         guidance_vec = None
-
+   
     for t_curr, t_prev in tqdm(zip(timesteps[:-1], timesteps[1:]), desc="Sampling", total=len(timesteps)-1):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         guidance_vec = guidance_vec.to(img.device, dtype=img.dtype)
@@ -359,6 +361,7 @@ def denoise_controlnet(
             unpacked = unpack(img.float(), height, width)
             callback(step=i, x=img, x0=unpacked, total_steps=len(timesteps) - 1)
         i += 1
+     
     return img
 
 def unpack(x: Tensor, height: int, width: int) -> Tensor:

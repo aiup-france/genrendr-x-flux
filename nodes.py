@@ -340,6 +340,7 @@ class XlabsSampler:
     RETURN_NAMES = ("latent",)
     FUNCTION = "sampling"
     CATEGORY = "XLabsNodes"
+    
     def sampling(self, model, conditioning, neg_conditioning,
              noise_seed, steps, timestep_to_start_cfg, true_gs,
              image_to_image_strength, denoise_strength,
@@ -351,30 +352,32 @@ class XlabsSampler:
         torch.cuda.empty_cache()
         # Assurez-vous que le modèle est chargé sans gradients
         print("****** load model ____________", model)
-        with torch.no_grad():
+        #with torch.no_grad():
             ##mm.load_model_gpu(model)
-            inmodel = model.model.to(torch.bfloat16)
-            print("Chargement du modèle", inmodel)
+         #   inmodel = model.model.to(torch.bfloat16)
+          #  print("Chargement du modèle", inmodel)
        
 
         torch.cuda.empty_cache()  # Nettoyage de la mémoire GPU
        
 
-        torch.cuda.empty_cache()
+        print("model******************")
+        #inmodel = model.model.to(torch.bfloat16)
+        inmodel = model.model
+      
 
-        
-  
+        print("******* inmodel*********", inmodel)
         inmodel.diffusion_model.double_blocks.to('cpu')  
         inmodel.diffusion_model.single_blocks.to('cuda:0') 
         inmodel.diffusion_model.final_layer.to('cuda:0')  
 
-        print("Chargement du modèle", inmodel)
-
+ 
+        
         torch.cuda.empty_cache()  # Nettoyage de la mémoire GPU
 
         # Définir le device et d'autres paramètres
         device = mm.get_torch_device()
-        print("Device", device)
+        
         device='cuda:1'
         # Configuration des types de données
         dtype_model = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -500,8 +503,8 @@ class XlabsSampler:
         torch.cuda.empty_cache()
 
         return lat_ret
-       
-
+        
+    
     '''
     def sampling(self, model, conditioning, neg_conditioning,
              noise_seed, steps, timestep_to_start_cfg, true_gs,
@@ -664,73 +667,63 @@ class XlabsSampler:
                  image_to_image_strength, denoise_strength,
                  latent_image=None, controlnet_condition=None
                  ):
-        additional_steps = 11 if controlnet_condition is None else 12
-        #with torch.no_grad():
-            #mm.load_model_gpu(model)
-            #inmodel = model.model
-        with torch.no_grad():
-            #mm.load_model_gpu(model)
-            inmodel = model.model.to(torch.float16)
-       
-        #with torch.no_grad():
-         #   mm.load_model_gpu(model)
-         #   inmodel = model.model
         
-
-
+        
+        additional_steps = 11 if controlnet_condition is None else 12
+        mm.load_model_gpu(model)
+        inmodel = model.model
         #print(conditioning[0][0].shape) #//t5
         #print(conditioning[0][1]['pooled_output'].shape) #//clip
         #print(latent_image['samples'].shape) #// torch.Size([1, 4, 64, 64]) // bc, 4, w//8, h//8
-        with torch.no_grad():
-            try:
-                guidance = conditioning[0][1]['guidance']
-            except:
-                guidance = 1.0
+        try:
+            guidance = conditioning[0][1]['guidance']
+        except:
+            guidance = 1.0
 
-            device=mm.get_torch_device()
-            if torch.backends.mps.is_available():
-                device = torch.device("mps")
-            if torch.cuda.is_bf16_supported():
-                dtype_model = torch.bfloat16
-            else:
-                dtype_model = torch.float16
-            #dtype_model = torch.bfloat16#model.model.diffusion_model.img_in.weight.dtype
-            offload_device=mm.unet_offload_device()
-
-            torch.manual_seed(noise_seed)
-            print("latent image", latent_image['samples'])
-            bc, c, h, w = latent_image['samples'].shape
-            print("********heingth of image", h,w,c,bc)
-            height = (h//2) * 16
-            width = (w//2) * 16
-            with torch.no_grad(): 
-                x = get_noise(
-                    bc, height, width, device=device,
-                    dtype=dtype_model, seed=noise_seed
-                )
-            orig_x = None
-            if c==16:
-                with torch.no_grad():
-                    orig_x=latent_image['samples']
-                    lat_processor2 = LATENT_PROCESSOR_Imagen()
-                    orig_x=lat_processor2.go_back(orig_x)
-                    orig_x=orig_x.to(device, dtype=dtype_model)
-
-
-            timesteps = get_schedule(
-                steps,
-                (width // 8) * (height // 8) // 4,
-                shift=True,
+        device=mm.get_torch_device()
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        if torch.cuda.is_bf16_supported():
+            dtype_model = torch.bfloat16
+        else:
+            dtype_model = torch.float16
+        #dtype_model = torch.bfloat16#model.model.diffusion_model.img_in.weight.dtype
+        offload_device=mm.unet_offload_device()
+        device = 'cuda:0'
+        torch.manual_seed(noise_seed)
+        print("latent image", latent_image['samples'])
+        bc, c, h, w = latent_image['samples'].shape
+        print("********heingth of image", h,w,c,bc)
+        height = (h//2) * 16
+        width = (w//2) * 16
+        with torch.no_grad(): 
+            x = get_noise(
+                bc, height, width, device=device,
+                dtype=dtype_model, seed=noise_seed
             )
-            #try:
-               #     inmodel.to(device)
-            #except:
-              #  pass
+        orig_x = None
+        if c==16:
             with torch.no_grad():
-                x.to(device)
+                orig_x=latent_image['samples']
+                lat_processor2 = LATENT_PROCESSOR_Imagen()
+                orig_x=lat_processor2.go_back(orig_x)
+                orig_x=orig_x.to(device, dtype=dtype_model)
 
 
-        device='cuda:1'
+        timesteps = get_schedule(
+            steps,
+            (width // 8) * (height // 8) // 4,
+            shift=True,
+        )
+        #try:
+           #     inmodel.to(device)
+        #except:
+          #  pass
+        with torch.no_grad():
+            x.to(device)
+
+
+        device='cuda:0'
         with torch.no_grad():
             inmodel.diffusion_model.to(device)
             #controlnet.to('cpu')
@@ -744,8 +737,8 @@ class XlabsSampler:
                 pass
         # for sampler preview
         x0_output = {}
-        callback = latent_preview.prepare_callback(model, len(timesteps) - 1, x0_output)
-
+        callback = core.latent_preview.prepare_callback(model, len(timesteps) - 1, x0_output)
+        
         if controlnet_condition is None:
             with torch.no_grad():
 
